@@ -44,7 +44,13 @@
   ", "                                         \
   "width = " GST_VIDEO_SIZE_RANGE              \
   ", "                                         \
-  "height = " GST_VIDEO_SIZE_RANGE " "
+  "height = " GST_VIDEO_SIZE_RANGE " ; "       \
+  "image/png, "                                \
+  "framerate = " GST_VIDEO_FPS_RANGE           \
+  ", "                                         \
+  "width = " GST_VIDEO_SIZE_RANGE              \
+  ", "                                         \
+  "height = " GST_VIDEO_SIZE_RANGE
 #endif
 
 GST_DEBUG_CATEGORY_STATIC(roscompimagesink_debug_category);
@@ -64,6 +70,8 @@ static gboolean roscompimagesink_close(RosBaseSink * sink);
 static gboolean roscompimagesink_setcaps(GstBaseSink * gst_base_sink, GstCaps * caps);
 static GstFlowReturn roscompimagesink_render(
   RosBaseSink * base_sink, GstBuffer * buffer, rclcpp::Time msg_time);
+
+static void roscompimagesink_finalize(GObject * object);
 
 enum {
   PROP_0,
@@ -94,6 +102,7 @@ static void roscompimagesink_class_init(RoscompimagesinkClass * klass)
 
   object_class->set_property = roscompimagesink_set_property;
   object_class->get_property = roscompimagesink_get_property;
+  object_class->finalize = roscompimagesink_finalize;
 
   /* Setting up pads and setting metadata should be moved to
      base_class_init if you intend to subclass this class. */
@@ -107,7 +116,7 @@ static void roscompimagesink_class_init(RoscompimagesinkClass * klass)
   g_object_class_install_property(
     object_class, PROP_ROS_TOPIC,
     g_param_spec_string(
-      "ros-topic", "pub-topic", "ROS topic to be published on", "gst_image_pub",
+      "ros-topic", "pub-topic", "ROS topic to be published on", "gst_image",
       (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   g_object_class_install_property(
@@ -143,6 +152,7 @@ static void roscompimagesink_init(Roscompimagesink * sink)
   sink->frame_id = g_strdup("image_frame");
   sink->encoding = g_strdup("");
   sink->init_caps = g_strdup("");
+  sink->format = NULL;  // Initialize format to NULL
 }
 
 void roscompimagesink_set_property(
@@ -234,15 +244,13 @@ static gboolean roscompimagesink_setcaps(GstBaseSink * gst_base_sink, GstCaps * 
   Roscompimagesink * sink = GST_ROSCOMPIMAGESINK(ros_base_sink);
 
   GstStructure * caps_struct;
-  gint width, height, depth, endianness, rate_num, rate_den;
-  const gchar * format_str;
-  GstVideoFormat format_enum;
-  const GstVideoFormatInfo * format_info;
+  const gchar * mime_type;
 
   GST_DEBUG_OBJECT(sink, "setcaps");
 
   if (!gst_caps_is_fixed(caps)) {
     RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "caps is not fixed");
+    return FALSE;
   }
 
   if (ros_base_sink->node_if)
@@ -251,56 +259,58 @@ static gboolean roscompimagesink_setcaps(GstBaseSink * gst_base_sink, GstCaps * 
       gst_caps_to_string(caps));
 
   caps_struct = gst_caps_get_structure(caps, 0);
-  if (!gst_structure_get_int(caps_struct, "width", &width))
-    RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing width");
-  if (!gst_structure_get_int(caps_struct, "height", &height))
-    RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing height");
-  if (!gst_structure_get_fraction(caps_struct, "framerate", &rate_num, &rate_den))
-    RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing framerate");
+  
+  // Get the mime type from the caps
+  mime_type = gst_structure_get_name(caps_struct);
+  
+  if (!mime_type) {
+    RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing mime type");
+    return FALSE;
+  }
+  
+  // Check if the mime type is supported (image/jpeg or image/png)
+  gboolean is_jpeg = (g_strcmp0(mime_type, "image/jpeg") == 0);
+  gboolean is_png = (g_strcmp0(mime_type, "image/png") == 0);
+  
+  if (!is_jpeg && !is_png) {
+    RCLCPP_ERROR(
+      ros_base_sink->node_if->logging->get_logger(), 
+      "Unsupported format: %s. Only image/jpeg and image/png are supported for CompressedImage", 
+      mime_type);
+    return FALSE;
+  }
 
-  format_str = gst_structure_get_string(caps_struct, "format");
+  // Free previous format string if it exists
+  if (sink->format) {
+    g_free(sink->format);
+    sink->format = NULL;
+  }
 
-  // if (format_str) {
-  //   format_enum = gst_video_format_from_string(format_str);
-  //   format_info = gst_video_format_get_info(format_enum);
-  //   depth = format_info->pixel_stride[0];
+  // Store the format based on mime type
+  if (is_jpeg) {
+    sink->format = g_strdup("jpeg");
+  } else if (is_png) {
+    sink->format = g_strdup("png");
+  }
 
-  //   //allow the encoding to be overridden by parameters
-  //   //but update it if it's blank
-  //   if (0 == g_strcmp0(sink->init_caps, "")) {
-  //     g_free(sink->init_caps);
-  //     sink->init_caps = gst_caps_to_string(caps);
-  //   }
-  //   if (0 == g_strcmp0(sink->encoding, "")) {
-  //     g_free(sink->encoding);
-  //     sink->encoding = g_strdup(gst_bridge::getRosEncoding(format_enum).c_str());
-  //   }
+  // Allow the encoding to be overridden by parameters
+  // but update it if it's blank
+  if (0 == g_strcmp0(sink->init_caps, "")) {
+    g_free(sink->init_caps);
+    sink->init_caps = gst_caps_to_string(caps);
+  }
+  
+  if (0 == g_strcmp0(sink->encoding, "")) {
+    g_free(sink->encoding);
+    sink->encoding = g_strdup(sink->format);
+  }
 
-  //   RCLCPP_INFO(
-  //     ros_base_sink->node_if->logging->get_logger(), "setcaps format string is %s ", format_str);
-  //   RCLCPP_INFO(
-  //     ros_base_sink->node_if->logging->get_logger(), "setcaps n_components is %d",
-  //     format_info->n_components);
-  //   RCLCPP_INFO(
-  //     ros_base_sink->node_if->logging->get_logger(), "setcaps bits is %d", format_info->bits);
-  //   RCLCPP_INFO(ros_base_sink->node_if->logging->get_logger(), "setcaps pixel_stride is %d", depth);
+  RCLCPP_INFO(
+    ros_base_sink->node_if->logging->get_logger(), 
+    "Compressed image format: %s", 
+    sink->format);
 
-  //   if (format_info->bits < 8) {
-  //     depth = depth / 8;
-  //     RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "low bits per pixel");
-  //   }
-  //   endianness = GST_VIDEO_FORMAT_INFO_IS_LE(format_info) ? G_LITTLE_ENDIAN : G_BIG_ENDIAN;
-  // } else {
-  //   RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing format");
-  //   if (!gst_structure_get_int(caps_struct, "endianness", &endianness))
-  //     RCLCPP_ERROR(ros_base_sink->node_if->logging->get_logger(), "setcaps missing endianness");
-  //   return false;
-  // }
-
-  //collect a bunch of parameters to shoehorn into a message format
-  sink->format = g_strdup(format_str);
-
-  return true;
+  return TRUE;
 }
 
 static GstFlowReturn roscompimagesink_render(
@@ -315,16 +325,59 @@ static GstFlowReturn roscompimagesink_render(
   msg.header.stamp = msg_time;
   msg.header.frame_id = sink->frame_id;
 
-  //auto msg = sink->pub->borrow_loaned_message();
-  //msg.get().width =
-  msg.format = sink->encoding;
+  // Use the encoding if provided, otherwise use the format
+  if (sink->encoding && strlen(sink->encoding) > 0) {
+    msg.format = sink->encoding;
+  } else if (sink->format) {
+    msg.format = sink->format;
+  } else {
+    // This should never happen as we validate formats in setcaps
+    RCLCPP_ERROR(
+      ros_base_sink->node_if->logging->get_logger(),
+      "No format specified for compressed image");
+    return GST_FLOW_ERROR;
+  }
 
   gst_buffer_map(buf, &info, GST_MAP_READ);
   msg.data.assign(info.data, info.data + info.size);
   gst_buffer_unmap(buf, &info);
 
-  //publish
+  // publish
   sink->pub->publish(msg);
 
   return GST_FLOW_OK;
+}
+
+static void roscompimagesink_finalize(GObject * object)
+{
+  Roscompimagesink * sink = GST_ROSCOMPIMAGESINK(object);
+
+  // Free all allocated strings
+  if (sink->pub_topic) {
+    g_free(sink->pub_topic);
+    sink->pub_topic = NULL;
+  }
+  
+  if (sink->frame_id) {
+    g_free(sink->frame_id);
+    sink->frame_id = NULL;
+  }
+  
+  if (sink->encoding) {
+    g_free(sink->encoding);
+    sink->encoding = NULL;
+  }
+  
+  if (sink->init_caps) {
+    g_free(sink->init_caps);
+    sink->init_caps = NULL;
+  }
+  
+  if (sink->format) {
+    g_free(sink->format);
+    sink->format = NULL;
+  }
+
+  // Chain up to the parent class
+  G_OBJECT_CLASS(roscompimagesink_parent_class)->finalize(object);
 }
