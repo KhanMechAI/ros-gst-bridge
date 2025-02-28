@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "intelliSenseMode": "linux-gcc-arm64",
+            "compilerPath": "/usr/bin/aarch64-linux-gnu-g++",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "defines": [],
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/src/**"
+            ]
+        }
+    ],
+    "version": 4
+}

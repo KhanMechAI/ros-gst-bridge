@@ -1,0 +1,8 @@
+{
+    "colcon.provideTasks": true,
+    "colcon.workspaceSetup": [
+        "install/setup.bash"
+    ],
+    "colcon.globalSetup": [],
+    "cmake.sourceDirectory": "/opt/ros/humble/src/ros-gst-bridge/gst_bridge"
+}
