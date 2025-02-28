@@ -322,7 +322,31 @@ static GstFlowReturn roscompimagesink_render(
   Roscompimagesink * sink = GST_ROSCOMPIMAGESINK(ros_base_sink);
   GST_DEBUG_OBJECT(sink, "render");
 
-  msg.header.stamp = msg_time;
+  // Extract the buffer timestamp if available
+  if (GST_BUFFER_PTS_IS_VALID(buf)) {
+    // Convert GStreamer timestamp (nanoseconds) to ROS time
+    GstClockTime pts = GST_BUFFER_PTS(buf);
+    int32_t sec = pts / GST_SECOND;
+    uint32_t nanosec = pts % GST_SECOND;
+    msg.header.stamp = rclcpp::Time(sec, nanosec);
+    
+    GST_DEBUG_OBJECT(sink, "Using buffer PTS timestamp: %lu ns (%d.%09u)", 
+                    pts, sec, nanosec);
+  } else if (GST_BUFFER_DTS_IS_VALID(buf)) {
+    // Fall back to DTS if PTS is not available
+    GstClockTime dts = GST_BUFFER_DTS(buf);
+    int32_t sec = dts / GST_SECOND;
+    uint32_t nanosec = dts % GST_SECOND;
+    msg.header.stamp = rclcpp::Time(sec, nanosec);
+    
+    GST_DEBUG_OBJECT(sink, "Using buffer DTS timestamp: %lu ns (%d.%09u)", 
+                    dts, sec, nanosec);
+  } else {
+    // Fall back to the provided msg_time if no buffer timestamp is available
+    msg.header.stamp = msg_time;
+    GST_DEBUG_OBJECT(sink, "No buffer timestamp available, using current time");
+  }
+
   msg.header.frame_id = sink->frame_id;
 
   // Use the encoding if provided, otherwise use the format
