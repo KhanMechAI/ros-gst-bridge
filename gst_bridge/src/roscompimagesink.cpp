@@ -153,6 +153,9 @@ static void roscompimagesink_init(Roscompimagesink * sink)
   sink->encoding = g_strdup("");
   sink->init_caps = g_strdup("");
   sink->format = NULL;  // Initialize format to NULL
+  sink->pts_initialized = FALSE;
+  sink->base_pts = 0;
+  sink->base_sys_time = 0;
 }
 
 void roscompimagesink_set_property(
@@ -322,31 +325,92 @@ static GstFlowReturn roscompimagesink_render(
   Roscompimagesink * sink = GST_ROSCOMPIMAGESINK(ros_base_sink);
   GST_DEBUG_OBJECT(sink, "render");
 
-  // Extract the buffer timestamp if available
+  // Get current system time
+  GstClock *sys_clock = gst_system_clock_obtain();
+  GstClockTime sys_time = gst_clock_get_time(sys_clock);
+  gst_object_unref(sys_clock);
+  
+  // Log the incoming message time
+  GST_DEBUG_OBJECT(sink, "Incoming message time: %.9f", msg_time.seconds());
+  
+  // Log system time from GStreamer
+  GST_DEBUG_OBJECT(sink, "GStreamer system time: %lu ns (%.9f)",
+                  sys_time, static_cast<double>(sys_time) / GST_SECOND);
+  
+  // Default to current ROS time
+  rclcpp::Time frame_time = msg_time;
+  
+  // Try to use buffer timestamps if available
   if (GST_BUFFER_PTS_IS_VALID(buf)) {
-    // Convert GStreamer timestamp (nanoseconds) to ROS time
     GstClockTime pts = GST_BUFFER_PTS(buf);
-    int32_t sec = pts / GST_SECOND;
-    uint32_t nanosec = pts % GST_SECOND;
-    msg.header.stamp = rclcpp::Time(sec, nanosec);
     
-    GST_DEBUG_OBJECT(sink, "Using buffer PTS timestamp: %lu ns (%d.%09u)", 
-                    pts, sec, nanosec);
+    GST_DEBUG_OBJECT(sink, "Buffer PTS: %lu ns (%.9f)",
+                    pts, static_cast<double>(pts) / GST_SECOND);
+    
+    // Initialize PTS reference if needed
+    if (!sink->pts_initialized) {
+      sink->base_pts = pts;
+      sink->base_sys_time = sys_time;
+      sink->pts_initialized = TRUE;
+      
+      GST_INFO_OBJECT(sink, "Initialized PTS reference: base_pts=%lu, base_sys_time=%lu",
+                     sink->base_pts, sink->base_sys_time);
+    }
+    
+    // Calculate time elapsed since the base PTS
+    GstClockTimeDiff pts_elapsed = pts - sink->base_pts;
+    
+    // Calculate the corresponding system time
+    GstClockTime estimated_sys_time = sink->base_sys_time + pts_elapsed;
+    
+    // Calculate how far in the past this frame is from current system time
+    GstClockTimeDiff time_diff = sys_time - estimated_sys_time;
+    
+    GST_DEBUG_OBJECT(sink, "PTS elapsed: %ld ns, Estimated system time: %lu, Time diff: %ld ns",
+                    pts_elapsed, estimated_sys_time, time_diff);
+    
+    // Only use the timestamp if it's reasonable (not too far in the past or future)
+    if (time_diff >= -GST_SECOND && time_diff < GST_SECOND * 10) {  // Allow slight future timestamps
+      // Convert to ROS time by adjusting current time
+      frame_time = msg_time - rclcpp::Duration::from_nanoseconds(time_diff);
+      
+      GST_DEBUG_OBJECT(sink, "Using PTS-based timestamp, frame_time: %.9f",
+                      frame_time.seconds());
+    } else {
+      GST_WARNING_OBJECT(sink, "PTS timestamp out of reasonable range after adjustment: diff=%ld ns", 
+                        time_diff);
+    }
   } else if (GST_BUFFER_DTS_IS_VALID(buf)) {
-    // Fall back to DTS if PTS is not available
     GstClockTime dts = GST_BUFFER_DTS(buf);
-    int32_t sec = dts / GST_SECOND;
-    uint32_t nanosec = dts % GST_SECOND;
-    msg.header.stamp = rclcpp::Time(sec, nanosec);
     
-    GST_DEBUG_OBJECT(sink, "Using buffer DTS timestamp: %lu ns (%d.%09u)", 
-                    dts, sec, nanosec);
+    GST_DEBUG_OBJECT(sink, "Buffer DTS: %lu ns (%.9f)",
+                    dts, static_cast<double>(dts) / GST_SECOND);
+    
+    // Convert GStreamer pipeline time to real time
+    GstClockTimeDiff time_diff = sys_time - dts;
+    
+    GST_DEBUG_OBJECT(sink, "Time difference (sys_time - DTS): %ld ns (%.9f)",
+                    time_diff, static_cast<double>(time_diff) / GST_SECOND);
+    
+    // Only use the timestamp if it's reasonable
+    if (time_diff >= 0 && time_diff < GST_SECOND * 10) {  // Within 10 seconds
+      frame_time = msg_time - rclcpp::Duration::from_nanoseconds(time_diff);
+      
+      GST_DEBUG_OBJECT(sink, "Using DTS-based timestamp, frame_time: %.9f", 
+                      frame_time.seconds());
+    } else {
+      GST_WARNING_OBJECT(sink, "DTS timestamp out of reasonable range: DTS=%lu, diff=%ld ns", 
+                        dts, time_diff);
+    }
   } else {
-    // Fall back to the provided msg_time if no buffer timestamp is available
-    msg.header.stamp = msg_time;
     GST_DEBUG_OBJECT(sink, "No buffer timestamp available, using current time");
   }
 
+  msg.header.stamp = frame_time;
+  
+  GST_DEBUG_OBJECT(sink, "Final message timestamp: %d.%09u",
+                  msg.header.stamp.sec, msg.header.stamp.nanosec);
+  
   msg.header.frame_id = sink->frame_id;
 
   // Use the encoding if provided, otherwise use the format

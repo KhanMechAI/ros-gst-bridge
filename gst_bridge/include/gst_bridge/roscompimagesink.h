@@ -50,9 +50,15 @@ struct _Roscompimagesink
   gchar * encoding;   //image topic encoding string
   gchar * init_caps;  //optional caps override (used for limited apis)
 
-  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr pub;
-
   gchar * format;
+  
+  // New fields for timestamp handling
+  gboolean pts_initialized;  // Whether we've initialized the PTS reference
+  GstClockTime base_pts;     // Base PTS value for reference
+  GstClockTime base_sys_time; // System time corresponding to base_pts
+
+  std::shared_ptr<sensor_msgs::msg::CompressedImage> msg;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr pub;
 };
 
 struct _RoscompimagesinkClass
