@@ -318,10 +318,6 @@ static GstFlowReturn roscompimagesink_render(
   //auto msg = sink->pub->borrow_loaned_message();
   //msg.get().width =
   msg.format = sink->encoding;
-  gst_buffer_map(buf, &info, GST_MAP_READ);
-  msg.data.assign(info.data, info.data + info.size);
-  gst_buffer_unmap(buf, &info);
-
 
   gst_buffer_map(buf, &info, GST_MAP_READ);
   msg.data.assign(info.data, info.data + info.size);
